@@ -146,7 +146,7 @@ jobs:
             # 先确保 dist 目录存在（避免输出失败）
             mkdir -p dist
             # 压缩为 zip 包并输出到 dist/ 目录下
-            zip -r dist/web-build.zip out/renderer
+            zip -r dist/web-build.zip . -C  out/renderer
             echo "✅ Web static files compressed to dist/web-build.zip"
           else
             echo "❌ Web build output not found at out/renderer"
