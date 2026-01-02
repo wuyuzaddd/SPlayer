@@ -126,13 +126,31 @@ jobs:
       #   if: runner.os == 'Linux'
       #   run: snapcraft upload dist/*.snap --release stable
       #   continue-on-error: true
+      - name: Build Web static files
+        if: runner.os == 'Linux'
+        run: pnpm build  # 仅构建 Web 静态文件（跳过原生模块）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compress Web static files
+        if: runner.os == 'Linux'
+        run: |
+          # 确保 Web 产物目录存在
+          if [ -d "out/renderer" ]; then
+            # 压缩为 zip 包（便于发布）
+            zip -r web-build.zip out/renderer
+            echo "✅ Web static files compressed to web-build.zip"
+          else
+            echo "❌ Web build output not found at out/renderer"
+            exit 1
+          fi
       # 合并所有构建
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: SPlayer-${{ runner.os }}
           path: dist/*.*
-
+                web-build.zip
   # ===================================================================
   # 收集并发布 Release
   # ===================================================================
