@@ -1,21 +1,27 @@
-import { useDataStore, useMusicStore, useSettingStore } from "@/stores";
+import { useDataStore, useMusicStore, useSettingStore, useStatusStore } from "@/stores";
 import { usePlayerController } from "@/core/player/PlayerController";
 import { isElectron } from "@/utils/env";
-import {
-  openExcludeComment,
-} from "@/utils/modal";
+import { openExcludeComment } from "@/utils/modal";
 import { sendRegisterProtocol } from "@/utils/protocol";
 import { SettingConfig } from "@/types/settings";
-import { ref, computed, h } from "vue";
 import { NAlert } from "naive-ui";
 
 export const useGeneralSettings = (): SettingConfig => {
   const dataStore = useDataStore();
   const musicStore = useMusicStore();
   const settingStore = useSettingStore();
+  const statusStore = useStatusStore();
   const player = usePlayerController();
 
   const useOnlineService = ref(settingStore.useOnlineService);
+  const updateChannel = ref("stable");
+
+  // 初始化更新通道
+  if (isElectron) {
+    window.api.store.get("updateChannel").then((val) => {
+      if (val) updateChannel.value = val;
+    });
+  }
 
   const handleModeChange = (val: boolean) => {
     if (val) {
@@ -83,14 +89,19 @@ export const useGeneralSettings = (): SettingConfig => {
       const rendererData = {
         "setting-store": localStorage.getItem("setting-store"),
         "shortcut-store": localStorage.getItem("shortcut-store"),
+        // "status-store": localStorage.getItem("status-store"),
+        // "music-store": localStorage.getItem("music-store"),
       };
       const result = await window.api.store.export(rendererData);
-      if (result) {
-        window.$message.success("设置导出成功");
+      if (result && result.success) {
+        window.$message.success(`设置导出成功: ${result.path}`);
       } else {
-        window.$message.error("设置导出失败");
+        const errorMsg = result?.error === "cancelled" ? "已取消导出" : "设置导出失败";
+        if (result?.error !== "cancelled") {
+          window.$message.error(errorMsg);
+        }
       }
-    } catch (error) {
+    } catch {
       window.$message.error("设置导出出错");
     }
   };
@@ -103,31 +114,53 @@ export const useGeneralSettings = (): SettingConfig => {
           h(
             NAlert,
             { type: "warning", showIcon: true, style: { marginBottom: "12px" } },
-            { default: () => "目前备份数据功能属于测试阶段，不保证可用性" },
+            {
+              default: () =>
+                "导入设置将覆盖当前所有配置（包括主题、快捷键、音效设置等）并重启软件。",
+            },
           ),
-          h("div", null, "导入设置将覆盖当前所有配置并重启软件，是否继续？"),
+          h("div", null, "是否继续？"),
         ]),
       positiveText: "确定",
       negativeText: "取消",
       onPositiveClick: async () => {
         try {
-          const data = await window.api.store.import();
-          if (data) {
+          const result = await window.api.store.import();
+          if (result && result.success) {
+            const data = result.data;
+            let restoredCount = 0;
             if (data.renderer) {
-              if (data.renderer["setting-store"])
-                localStorage.setItem("setting-store", data.renderer["setting-store"]);
-              if (data.renderer["shortcut-store"])
-                localStorage.setItem("shortcut-store", data.renderer["shortcut-store"]);
+              const storesToRestore = [
+                "setting-store",
+                "shortcut-store",
+                // "status-store",
+                // "music-store",
+              ];
+
+              storesToRestore.forEach((key) => {
+                if (data.renderer[key]) {
+                  localStorage.setItem(key, data.renderer[key]);
+                  restoredCount++;
+                }
+              });
             }
-            window.$message.success("设置导入成功，即将重启");
-            setTimeout(() => {
-              window.location.reload();
-            }, 1000);
+
+            if (restoredCount > 0 || data.electron) {
+              window.$message.success("设置导入成功，即将重启");
+              setTimeout(() => {
+                window.location.reload();
+              }, 1000);
+            } else {
+              window.$message.warning("未找到可恢复的设置数据");
+            }
           } else {
-            window.$message.error("设置导入失败或已取消");
+            if (result?.error !== "cancelled") {
+              window.$message.error("设置导入失败: " + (result?.error || "未知错误"));
+            }
           }
         } catch (error) {
           window.$message.error("设置导入出错");
+          console.error(error);
         }
       },
     });
@@ -244,6 +277,29 @@ export const useGeneralSettings = (): SettingConfig => {
               set: (v) => (settingStore.checkUpdateOnStart = v),
             }),
           },
+          {
+            key: "updateChannel",
+            label: "更新通道",
+            type: "select",
+            description: "切换更新通道（测试版可体验最新功能，但不保证稳定性）",
+            options: [
+              { label: "正式版", value: "stable" },
+              { label: "测试版", value: "nightly" },
+            ],
+            value: computed({
+              get: () => updateChannel.value,
+              set: async (v) => {
+                updateChannel.value = v;
+                // 同步设置
+                if (isElectron) {
+                  await window.api.store.set("updateChannel", v);
+                  // 切换后立即检查更新
+                  statusStore.updateCheck = true;
+                  window.electron.ipcRenderer.send("check-update", true);
+                }
+              },
+            }),
+          },
         ],
       },
       {
@@ -269,13 +325,18 @@ export const useGeneralSettings = (): SettingConfig => {
             }),
           },
           {
-            key: "clearSearchOnBlur",
-            label: "失焦自动清空搜索框",
-            type: "switch",
-            description: "搜索框失去焦点后自动清空内容",
+            key: "searchInputBehavior",
+            label: "搜索框行为",
+            type: "select",
+            description: "自定义搜索框的行为模式",
+            options: [
+              { label: "保留搜索词", value: "normal" },
+              { label: "失焦后清空", value: "clear" },
+              { label: "同步搜索词", value: "sync" },
+            ],
             value: computed({
-              get: () => settingStore.clearSearchOnBlur,
-              set: (v) => (settingStore.clearSearchOnBlur = v),
+              get: () => settingStore.searchInputBehavior,
+              set: (v) => (settingStore.searchInputBehavior = v),
             }),
           },
           {
@@ -295,6 +356,25 @@ export const useGeneralSettings = (): SettingConfig => {
             description: "配置排除评论的规则（关键词或正则表达式）",
             buttonLabel: "配置",
             action: openExcludeComment,
+          },
+        ],
+      },
+      {
+        title: "其他设置",
+        items: [
+          {
+            key: "shareUrlFormat",
+            label: "分享链接格式",
+            type: "select",
+            description: "自定义分享链接的生成格式",
+            options: [
+              { label: "网页版", value: "web" },
+              { label: "移动版", value: "mobile" },
+            ],
+            value: computed({
+              get: () => settingStore.shareUrlFormat,
+              set: (v) => (settingStore.shareUrlFormat = v),
+            }),
           },
         ],
       },

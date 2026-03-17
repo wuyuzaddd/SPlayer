@@ -1,3 +1,4 @@
+import { toRaw } from "vue";
 import { defineStore } from "pinia";
 import type {
   SongType,
@@ -99,7 +100,6 @@ export const useDataStore = defineStore("data", {
       userId: 0,
       userType: 0,
       vipType: 0,
-
       name: "",
     },
     // 用户列表（多账号）
@@ -170,6 +170,7 @@ export const useDataStore = defineStore("data", {
             }
           }),
         );
+
         // 获取 user-data
         const userDataKeys = await userDB.keys();
         await Promise.all(

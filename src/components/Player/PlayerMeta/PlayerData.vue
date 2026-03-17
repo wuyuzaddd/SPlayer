@@ -14,7 +14,7 @@
       </span>
       <!-- 额外信息 -->
       <n-flex
-        v-if="statusStore.playUblock || musicStore.playSong.pc"
+        v-if="statusStore.isUnlocked || musicStore.playSong.pc"
         class="extra-info"
         align="center"
       >
@@ -56,9 +56,29 @@
           {{ !statusStore.songQuality ? "未知音质" : statusStore.songQuality }}
         </span>
         <!-- 歌词模式 -->
-        <span class="meta-item">{{ lyricMode }}</span>
-        <!-- 是否在线 -->
-        <span class="meta-item">
+        <n-popselect
+          v-if="lyricSourceOptions.length > 1"
+          trigger="click"
+          :value="settingStore.lyricPriority"
+          :options="lyricSourceOptions"
+          @update:value="(val) => lyricManager.switchLyricSource(val)"
+        >
+          <span class="meta-item clickable">{{ lyricMode }}</span>
+        </n-popselect>
+        <span v-else class="meta-item">{{ lyricMode }}</span>
+        <!-- 音源状态 -->
+        <n-popselect
+          v-if="audioSourceOptions.length > 1 && canSwitchSource"
+          trigger="click"
+          :value="statusStore.audioSource"
+          :options="audioSourceOptions"
+          @update:value="(val) => player.switchAudioSource(val)"
+        >
+          <span class="meta-item clickable">
+            {{ audioSourceText }}
+          </span>
+        </n-popselect>
+        <span v-else class="meta-item">
           {{ audioSourceText }}
         </span>
       </n-flex>
@@ -72,9 +92,7 @@
             class="ar"
             @click="jumpPage({ name: 'artist', query: { id: ar.id } })"
           >
-            {{
-              settingStore.hideBracketedContent ? removeBrackets(ar.name) : ar.name
-            }}
+            {{ settingStore.hideBracketedContent ? removeBrackets(ar.name) : ar.name }}
           </span>
         </div>
         <div v-else class="ar-list">
@@ -88,7 +106,9 @@
       <div v-else class="artists">
         <SvgIcon :depth="3" name="Artist" size="20" />
         <div class="ar-list">
-          <span class="ar">{{ musicStore.playSong.dj?.creator || "未知艺术家" }}</span>
+          <span class="ar" @click="showCreatorTip">
+            {{ musicStore.playSong.dj?.creator || "未知艺术家" }}
+          </span>
         </div>
       </div>
       <!-- 专辑 -->
@@ -117,7 +137,7 @@
       <div
         v-if="musicStore.playSong.type === 'radio'"
         class="dj"
-        @click="jumpPage({ name: 'dj', query: { id: musicStore.playSong.dj?.id } })"
+        @click="jumpToRadio"
       >
         <SvgIcon :depth="3" name="Podcast" size="20" />
         <span class="name-text text-hidden">{{ musicStore.playSong.dj?.name || "播客电台" }}</span>
@@ -132,7 +152,9 @@ import { useMusicStore, useStatusStore, useSettingStore } from "@/stores";
 import { debounce, isObject } from "lodash-es";
 import { removeBrackets } from "@/utils/format";
 import { SongUnlockServer } from "@/core/player/SongManager";
-
+import { useLyricManager } from "@/core/player/LyricManager";
+import { usePlayerController } from "@/core/player/PlayerController";
+import { radioProgramDetail } from "@/api/radio";
 const props = defineProps<{
   /** 数据居中 */
   center?: boolean;
@@ -144,10 +166,12 @@ const router = useRouter();
 const musicStore = useMusicStore();
 const statusStore = useStatusStore();
 const settingStore = useSettingStore();
+const lyricManager = useLyricManager();
+const player = usePlayerController();
 
 // 当前歌词模式
 const lyricMode = computed(() => {
-  if (settingStore.showYrc) {
+  if (settingStore.showWordLyrics) {
     if (statusStore.usingTTMLLyric) return "TTML";
     if (musicStore.isHasYrc) {
       // 如果是从QQ音乐获取的歌词，显示QRC
@@ -157,6 +181,20 @@ const lyricMode = computed(() => {
   return musicStore.isHasLrc ? "LRC" : "NO-LRC";
 });
 
+const lyricSourceOptions = computed(() => {
+  const options = [
+    { label: "自动", value: "auto" },
+    { label: "官方优先", value: "official" },
+  ];
+  if (settingStore.enableQQMusicLyric) {
+    options.push({ label: "QM 优先", value: "qm" });
+  }
+  if (settingStore.enableOnlineTTMLLyric) {
+    options.push({ label: "TTML 优先", value: "ttml" });
+  }
+  return options;
+});
+
 // 左侧外边距
 const leftMargin = computed(() => {
   if (props.center || !props.light) return "0px";
@@ -164,21 +202,46 @@ const leftMargin = computed(() => {
   return settingStore.useAMLyrics ? `${offset + 40}px` : `${offset + 10}px`;
 });
 
-/** 歌曲解锁服务器名称映射 */
+/** 音频源选项 */
+const audioSourceOptions = computed(() => {
+  const options = [{ label: "自动", value: "auto" }];
+  settingStore.songUnlockServer.forEach((server) => {
+    if (server.enabled) {
+      options.push({
+        label: sourceMap[server.key] || server.key.toUpperCase(),
+        value: server.key,
+      });
+    }
+  });
+  return options;
+});
+
+/** 是否可以切换音频源 */
+const canSwitchSource = computed(() => {
+  const song = musicStore.playSong;
+  return !song.path && song.type === "song" && !song.pc;
+});
+
+/** 音频源名称映射 */
 const sourceMap: Record<string, string> = {
+  official: "Official",
   [SongUnlockServer.NETEASE]: "Netease",
   [SongUnlockServer.KUWO]: "Kuwo",
   [SongUnlockServer.BODIAN]: "Bodian",
   [SongUnlockServer.GEQUBAO]: "Gequbao",
+  local: "Local",
+  streaming: "Streaming",
 };
 
+/** 音频源名称 */
 const audioSourceText = computed(() => {
-  if (musicStore.playSong.path) return "LOCAL";
-  if (musicStore.playSong.type === "streaming") return "STREAMING";
+  if (musicStore.playSong.path) return "本地";
+  if (musicStore.playSong.type === "streaming") return "流媒体";
+  if (musicStore.playSong.pc) return "云盘";
   if (statusStore.audioSource) {
     return sourceMap[statusStore.audioSource] || statusStore.audioSource.toUpperCase();
   }
-  return "ONLINE";
+  return "Netease";
 });
 
 const jumpPage = debounce(
@@ -186,6 +249,36 @@ const jumpPage = debounce(
     if (!go) return;
     statusStore.showFullPlayer = false;
     router.push(go);
+  },
+  300,
+  {
+    leading: true,
+    trailing: false,
+  },
+);
+
+// 暂不支持查看主播主页
+const showCreatorTip = () => window.$message.info("暂不支持查看主播主页");
+
+// 跳转到播客电台页面
+const jumpToRadio = debounce(
+  async () => {
+    const song = musicStore.playSong;
+    let radioId = song.dj?.radioId;
+    // 兼容旧数据：通过节目详情 API 获取电台 ID
+    if (!radioId && song.id) {
+      try {
+        const res = await radioProgramDetail(song.id);
+        radioId = res.program?.radio?.id;
+        // 回写避免重复请求
+        if (radioId && song.dj) song.dj.radioId = radioId;
+      } catch (_e) {
+        // ignore
+      }
+    }
+    if (!radioId) return;
+    statusStore.showFullPlayer = false;
+    router.push({ name: "radio", query: { id: radioId } });
   },
   300,
   {
@@ -203,6 +296,7 @@ const jumpPage = debounce(
   max-width: 50vh;
   margin-top: 24px;
   padding: 0 2px;
+  // mix-blend-mode: plus-lighter;
   .n-icon {
     color: rgb(var(--main-cover-color));
   }
@@ -325,7 +419,7 @@ const jumpPage = debounce(
   }
   &.center {
     align-items: center;
-    padding: 0 2px;
+    padding: 0 40px;
     .name {
       text-align: center;
     }

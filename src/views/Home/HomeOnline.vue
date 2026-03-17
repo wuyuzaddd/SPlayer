@@ -43,8 +43,19 @@
         </n-h3>
       </n-flex>
       <!-- 列表 -->
-      <ArtistList v-if="item.type === 'artist'" :data="item.list" :loading="true" :hiddenCover="settingStore.hiddenCovers.home" />
-      <CoverList v-else :data="item.list" :type="item.type" :loading="true" :hiddenCover="settingStore.hiddenCovers.home" />
+      <ArtistList
+        v-if="item.type === 'artist'"
+        :data="item.list"
+        :loading="true"
+        :hiddenCover="settingStore.hiddenCovers.home"
+      />
+      <CoverList
+        v-else
+        :data="item.list"
+        :type="item.type"
+        :loading="true"
+        :hiddenCover="settingStore.hiddenCovers.home"
+      />
     </div>
   </div>
 </template>
@@ -93,6 +104,7 @@ const settingStore = useSettingStore();
 
 // 日推标题
 const dailySongsTitle = computed(() => {
+  if (settingStore.hiddenCovers.home) return "每日推荐";
   const day = new Date().getDate();
   return h("div", { class: "date" }, [
     h("div", { class: "date-icon" }, [

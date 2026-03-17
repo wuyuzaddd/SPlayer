@@ -1,16 +1,22 @@
-import { useDataStore, useSettingStore, useShortcutStore, useStatusStore } from "@/stores";
-import { useEventListener } from "@vueuse/core";
-import { openUserAgreement } from "@/utils/modal";
-import { debounce } from "lodash-es";
-import { isElectron } from "./env";
-import { usePlayerController } from "@/core/player/PlayerController";
 import { mediaSessionManager } from "@/core/player/MediaSessionManager";
+import { usePlayerController } from "@/core/player/PlayerController";
 import { useDownloadManager } from "@/core/resource/DownloadManager";
-import packageJson from "@/../package.json";
-import log from "./log";
+import { useDataStore, useSettingStore, useShortcutStore, useStatusStore } from "@/stores";
+import { TASKBAR_IPC_CHANNELS } from "@/types/shared";
+import { isElectron, isMac } from "@/utils/env";
+import { printVersion } from "@/utils/log";
+import { openUserAgreement } from "@/utils/modal";
+import { useEventListener } from "@vueuse/core";
+import { debounce } from "lodash-es";
+import { onMounted, watch } from "vue";
 
-// 应用初始化时需要执行的操作
-const init = async () => {
+/** 最终聚焦主窗口的延迟时间（毫秒） */
+const FINAL_FOCUS_DELAY_MS = 500;
+
+/**
+ * 应用初始化时需要执行的操作
+ */
+export const useInit = () => {
   // init pinia-data
   const dataStore = useDataStore();
   const statusStore = useStatusStore();
@@ -20,59 +26,82 @@ const init = async () => {
   const player = usePlayerController();
   const downloadManager = useDownloadManager();
 
-  // 检查并执行设置迁移
-  settingStore.checkAndMigrate();
-
-  printVersion();
-
-  // 用户协议
-  openUserAgreement();
-
   // 事件监听
   initEventListener();
 
-  // 加载数据
-  await dataStore.loadData();
-
-  // 初始化 MediaSession
-  mediaSessionManager.init();
-
-  // 初始化播放器
-  player.playSong({
-    autoPlay: settingStore.autoPlay,
-    seek: settingStore.memoryLastSeek ? statusStore.currentTime : 0,
-  });
-  // 同步播放模式
-  player.playModeSyncIpc();
-  // 初始化自动关闭定时器
-  if (statusStore.autoClose.enable) {
-    const { endTime, time } = statusStore.autoClose;
-    const now = Date.now();
-
-    if (endTime > now) {
-      // 计算真实剩余时间
-      const realRemainTime = Math.ceil((endTime - now) / 1000);
-      player.startAutoCloseTimer(time, realRemainTime);
-    } else {
-      // 定时器已过期，重置状态
-      statusStore.autoClose.enable = false;
-      statusStore.autoClose.remainTime = time * 60;
-      statusStore.autoClose.endTime = 0;
+    onMounted(async () => {
+    // 检查并执行设置迁移
+    settingStore.checkAndMigrate();
+    // 打印版本信息
+    printVersion();
+    // 用户协议
+    openUserAgreement();
+    // 加载数据
+    await dataStore.loadData();
+    // 初始化 MediaSession
+    mediaSessionManager.init();
+    // 初始化播放器
+    player.playSong({
+      autoPlay: settingStore.autoPlay,
+      seek: settingStore.memoryLastSeek ? statusStore.currentTime : 0,
+    });
+    // 同步播放模式
+    player.playModeSyncIpc();
+    // 初始化自动关闭定时器
+    if (statusStore.autoClose.enable) {
+      const { endTime, time } = statusStore.autoClose;
+      const now = Date.now();
+      if (endTime > now) {
+        // 计算真实剩余时间
+        const realRemainTime = Math.ceil((endTime - now) / 1000);
+        player.startAutoCloseTimer(time, realRemainTime);
+      } else {
+        // 定时器已过期，重置状态
+        statusStore.autoClose.enable = false;
+        statusStore.autoClose.remainTime = time * 60;
+        statusStore.autoClose.endTime = 0;
+      }
     }
-  }
 
-  if (isElectron) {
-    // 注册全局快捷键
-    shortcutStore.registerAllShortcuts();
-    // 初始化下载管理器
-    downloadManager.init();
-    // 显示窗口
-    window.electron.ipcRenderer.send("win-loaded");
-    // 显示桌面歌词
-    window.electron.ipcRenderer.send("toggle-desktop-lyric", statusStore.showDesktopLyric);
-    // 检查更新
-    if (settingStore.checkUpdateOnStart) window.electron.ipcRenderer.send("check-update");
-  }
+    // 监听设置变化以更新 ReplayGain
+    watch(
+      () => [settingStore.enableReplayGain, settingStore.replayGainMode],
+      () => player.applyReplayGain(),
+    );
+
+    if (isElectron) {
+      // 注册全局快捷键
+      shortcutStore.registerAllShortcuts();
+      // 初始化下载管理器
+      downloadManager.init();
+      // 显示窗口
+      window.electron.ipcRenderer.send("win-loaded");
+      // 同步任务栏歌词状态
+      const taskbarConfig = await window.electron.ipcRenderer.invoke(
+        TASKBAR_IPC_CHANNELS.GET_OPTION,
+      );
+      statusStore.showTaskbarLyric = taskbarConfig?.enabled ?? statusStore.showTaskbarLyric ?? false;
+      window.electron.ipcRenderer.send(
+        TASKBAR_IPC_CHANNELS.SET_OPTION,
+        { enabled: statusStore.showTaskbarLyric },
+        true,
+      );
+      // 显示桌面歌词
+      window.electron.ipcRenderer.send("desktop-lyric:toggle", statusStore.showDesktopLyric);
+      // 检查更新
+      if (settingStore.checkUpdateOnStart) window.electron.ipcRenderer.send("check-update", false);
+      // 如果启用macOS歌词，发送初始数据
+      if (isMac && settingStore.macos.statusBarLyric.enabled) {
+        window.electron.ipcRenderer.send(TASKBAR_IPC_CHANNELS.REQUEST_DATA);
+      }
+      // 确保主窗口在最后获得焦点
+      if (statusStore.showDesktopLyric) {
+        setTimeout(() => {
+          window.electron.ipcRenderer.send("win-show-main");
+        }, FINAL_FOCUS_DELAY_MS);
+      }
+    }
+  });
 };
 
 // 事件监听
@@ -132,6 +161,12 @@ const keyDownEvent = debounce((event: KeyboardEvent) => {
         case "playNext":
           player.nextOrPrev("next");
           break;
+        case "seekForward":
+          player.seekBy(5000);
+          break;
+        case "seekBackward":
+          player.seekBy(-5000);
+          break;
         case "volumeUp":
           player.setVolume("up");
           break;
@@ -161,11 +196,3 @@ const keyDownEvent = debounce((event: KeyboardEvent) => {
     }
   }
 }, 100);
-
-// 版本输出
-const printVersion = async () => {
-  log.success(`🚀 ${packageJson.version}`, packageJson.productName);
-  log.info(`👤 ${packageJson.author}`, packageJson.github);
-};
-
-export default init;
