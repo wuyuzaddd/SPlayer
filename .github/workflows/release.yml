@@ -164,7 +164,8 @@ jobs:
           esac
 
       - name: Compress Web static files
-        if: runner.os == 'Linux-x64'
+        if: runner.os == 'Linux'
+        shell: bash
         run: |
           # 确保 Web 产物目录存在
           if [ -d "out/renderer" ]; then
@@ -176,6 +177,7 @@ jobs:
           else
             echo "❌ Web build output not found at out/renderer"
             exit 1
+          fi
 
       # 修复 Linux arm64 自动更新清单命名
       - name: Rename Linux arm64 update manifest
