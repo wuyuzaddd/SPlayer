@@ -164,7 +164,7 @@ jobs:
           esac
 
       - name: Compress Web static files
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux-x64'
         run: |
           # 确保 Web 产物目录存在
           if [ -d "out/renderer" ]; then
